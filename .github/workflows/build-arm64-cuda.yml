@@ -16,6 +16,7 @@ jobs:
     env:
       CUDA_VERSION: "12.6"
       CUDNN_HOME: /usr
+      TENSORRT_HOME: /usr
       ORT_BUILD_CONFIG: RelWithDebInfo
       ORT_REPO: https://github.com/Microsoft/onnxruntime
       ORT_REF: main          # change to a specific tag/commit for a reproducible build
@@ -77,20 +78,35 @@ jobs:
           echo "CUDA_HOME=$CUDA_HOME_REAL" >> "$GITHUB_ENV"
 
       # -----------------------------------------------------------------------
-      # 4. Verify CUDA installation
+      # 4. Install TensorRT 10.x (SBSA / aarch64, CUDA 12.6)
+      # -----------------------------------------------------------------------
+      - name: Install TensorRT
+        run: |
+          # The NVIDIA apt repo added in the previous step already carries TRT 10.
+          # libnvinfer-dev pulls in headers + libs; libnvinfer-plugin-dev adds plugins.
+          sudo apt-get install -y \
+            libnvinfer-dev \
+            libnvinfer-headers-dev \
+            libnvinfer-plugin-dev \
+            libnvonnxparsers-dev
+          # Verify the headers are where CMake will look
+          dpkg -L libnvinfer-headers-dev | grep NvInferVersion.h
+
+      # -----------------------------------------------------------------------
+      # 5. Verify CUDA installation
       # -----------------------------------------------------------------------
       - name: Verify CUDA
         run: nvcc --version
 
       # -----------------------------------------------------------------------
-      # 5. Checkout ONNX Runtime (with submodules)
+      # 6. Checkout ONNX Runtime (with submodules)
       # -----------------------------------------------------------------------
       - name: Checkout ONNX Runtime
         run: |
           git clone --recursive --depth 1 --branch "$ORT_REF" "$ORT_REPO" /opt/onnxruntime
 
       # -----------------------------------------------------------------------
-      # 6. Install Python build requirements
+      # 7. Install Python build requirements
       # -----------------------------------------------------------------------
       - name: Install Python requirements
         run: |
@@ -98,7 +114,7 @@ jobs:
           pip3 install numpy psutil
 
       # -----------------------------------------------------------------------
-      # 7. Build ONNX Runtime (ARM64, CUDA 12.6, shared library)
+      # 8. Build ONNX Runtime (ARM64, CUDA 12.6, TensorRT, shared library)
       # -----------------------------------------------------------------------
       - name: Build ONNX Runtime
         working-directory: /opt/onnxruntime
@@ -109,14 +125,15 @@ jobs:
             --parallel \
             --skip_tests \
             --use_cuda \
-            --use_tensorrt --tensorrt_home /usr/lib/aarch64-linux-gnu \
             --cuda_home "$CUDA_HOME" \
             --cudnn_home "$CUDNN_HOME" \
+            --use_tensorrt \
+            --tensorrt_home "$TENSORRT_HOME" \
             --cmake_extra_defines \
               CMAKE_CUDA_ARCHITECTURES=87   # Jetson Orin (Ampere sm_87)
 
       # -----------------------------------------------------------------------
-      # 8. Install artefacts to a custom prefix via cmake --install
+      # 9. Install artefacts to a custom prefix via cmake --install
       # -----------------------------------------------------------------------
       - name: Install artefacts
         run: |
@@ -126,7 +143,7 @@ jobs:
           ls -lhR /tmp/ort-install/
 
       # -----------------------------------------------------------------------
-      # 9. Upload artefacts
+      # 10. Upload artefacts
       # -----------------------------------------------------------------------
       - name: Upload artefacts
         uses: actions/upload-artifact@v4
