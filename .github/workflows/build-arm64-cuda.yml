@@ -115,18 +115,14 @@ jobs:
               CMAKE_CUDA_ARCHITECTURES=87   # Jetson Orin (Ampere sm_87)
 
       # -----------------------------------------------------------------------
-      # 8. Collect build artefacts
+      # 8. Install artefacts to a custom prefix via cmake --install
       # -----------------------------------------------------------------------
-      - name: Collect artefacts
+      - name: Install artefacts
         run: |
-          mkdir -p /tmp/ort-artefacts
-          # Shared libraries
-          find /opt/onnxruntime/build/Linux/"$ORT_BUILD_CONFIG" \
-            -maxdepth 1 \( -name "*.so" -o -name "*.so.*" \) \
-            -exec cp {} /tmp/ort-artefacts/ \;
-          # Headers
-          cp -r /opt/onnxruntime/include/onnxruntime /tmp/ort-artefacts/include
-          ls -lh /tmp/ort-artefacts/
+          cmake --install /opt/onnxruntime/build/Linux/"$ORT_BUILD_CONFIG" \
+            --config "$ORT_BUILD_CONFIG" \
+            --prefix /tmp/ort-install
+          ls -lhR /tmp/ort-install/
 
       # -----------------------------------------------------------------------
       # 9. Upload artefacts
@@ -135,5 +131,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: onnxruntime-arm64-cuda12.6
-          path: /tmp/ort-artefacts/
+          path: /tmp/ort-install/
           retention-days: 30
