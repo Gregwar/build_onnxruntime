@@ -119,10 +119,12 @@ jobs:
       - name: Build ONNX Runtime
         working-directory: /opt/onnxruntime
         run: |
+          # --parallel 2: nvcc is very memory-hungry (>4 GB/thread); the runner
+          # has ~15 GB RAM so 2 parallel jobs is the safe ceiling with TRT EP.
           ./build.sh \
             --config "$ORT_BUILD_CONFIG" \
             --build_shared_lib \
-            --parallel \
+            --parallel 2 \
             --skip_tests \
             --use_cuda \
             --cuda_home "$CUDA_HOME" \
@@ -130,7 +132,21 @@ jobs:
             --use_tensorrt \
             --tensorrt_home "$TENSORRT_HOME" \
             --cmake_extra_defines \
-              CMAKE_CUDA_ARCHITECTURES=87   # Jetson Orin (Ampere sm_87)
+              CMAKE_CUDA_ARCHITECTURES=87 \
+            2>&1 | tee /tmp/ort-build.log
+          # Propagate the real exit code (tee always exits 0 otherwise)
+          exit "${PIPESTATUS[0]}"
+
+      # -----------------------------------------------------------------------
+      # 8b. Upload build log on failure (for post-mortem inspection)
+      # -----------------------------------------------------------------------
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ort-build-log
+          path: /tmp/ort-build.log
+          retention-days: 7
 
       # -----------------------------------------------------------------------
       # 9. Install artefacts to a custom prefix via cmake --install
