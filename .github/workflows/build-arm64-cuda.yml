@@ -1,0 +1,206 @@
+name: Build ONNX Runtime - ARM64 + CUDA 12.6 (Jetson Orin)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      onnxruntime_version:
+        description: 'ONNX Runtime git tag or branch to build'
+        required: false
+        default: 'v1.20.1'
+
+env:
+  ONNXRUNTIME_VERSION: ${{ github.event.inputs.onnxruntime_version || 'v1.20.1' }}
+
+jobs:
+  build:
+    name: Cross-compile ONNX Runtime for ARM64 + CUDA 12.6
+    # Run on a standard x86_64 Linux runner for cross-compilation
+    runs-on: ubuntu-22.04
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Checkout this repository (contains the BUILD.md reference)
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # 2. Set up QEMU so Docker can run aarch64 images if needed
+      # -----------------------------------------------------------------------
+      - name: Set up QEMU for ARM64 emulation
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      # -----------------------------------------------------------------------
+      # 3. Set up Docker Buildx
+      # -----------------------------------------------------------------------
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # -----------------------------------------------------------------------
+      # 4. Clone ONNX Runtime source
+      # -----------------------------------------------------------------------
+      - name: Clone ONNX Runtime source
+        run: |
+          git clone --recursive --branch "$ONNXRUNTIME_VERSION" \
+            https://github.com/Microsoft/onnxruntime onnxruntime
+          echo "ONNXRUNTIME_SHA=$(git -C onnxruntime rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      # -----------------------------------------------------------------------
+      # 5. Build the cross-compilation Docker image
+      #    Base image: nvcr.io/nvidia/l4t-cuda:12.6.x-devel (Jetson CUDA 12.6)
+      #    We build ONNX Runtime inside the container using the official
+      #    build.sh script with --use_cuda and --arm64 flags.
+      # -----------------------------------------------------------------------
+      - name: Create cross-compile Dockerfile
+        run: |
+          cat > Dockerfile.arm64_cuda <<'DOCKERFILE'
+          # ----------------------------------------------------------------
+          # Stage 1 – Build environment
+          # Jetson L4T CUDA 12.6 developer image (aarch64)
+          # ----------------------------------------------------------------
+          FROM nvcr.io/nvidia/l4t-cuda:12.6.11-devel AS builder
+
+          # Avoid interactive prompts during apt installs
+          ENV DEBIAN_FRONTEND=noninteractive
+
+          # Install build dependencies
+          RUN apt-get update && apt-get install -y --no-install-recommends \
+                build-essential \
+                ca-certificates \
+                cmake \
+                curl \
+                git \
+                libcurl4-openssl-dev \
+                libssl-dev \
+                ninja-build \
+                python3 \
+                python3-dev \
+                python3-pip \
+                python3-setuptools \
+                python3-wheel \
+                tar \
+                wget \
+              && rm -rf /var/lib/apt/lists/*
+
+          # Install Python build-time requirements
+          RUN pip3 install --no-cache-dir \
+                numpy \
+                packaging \
+                setuptools \
+                wheel
+
+          # Copy the ONNX Runtime source (added by Docker build context)
+          COPY onnxruntime /code/onnxruntime
+          WORKDIR /code/onnxruntime
+
+          # ----------------------------------------------------------------
+          # Build ONNX Runtime:
+          #   --config Release            → optimised, no debug symbols
+          #   --arm64                     → target aarch64
+          #   --use_cuda                  → enable CUDA execution provider
+          #   --cuda_home /usr/local/cuda → CUDA toolkit path inside L4T image
+          #   --cudnn_home /usr           → cuDNN ships under /usr in L4T images
+          #   --build_shared_lib          → produce libonnxruntime.so
+          #   --parallel                  → use all available cores
+          #   --skip_tests                → skip tests (cross-compile host ≠ target)
+          # ----------------------------------------------------------------
+          RUN ./build.sh \
+                --config Release \
+                --arm64 \
+                --use_cuda \
+                --cuda_home /usr/local/cuda \
+                --cudnn_home /usr \
+                --build_shared_lib \
+                --parallel \
+                --skip_tests \
+                --update \
+                --build
+
+          # ----------------------------------------------------------------
+          # Stage 2 – Collect artefacts in a minimal image
+          # ----------------------------------------------------------------
+          FROM nvcr.io/nvidia/l4t-base:r36.3.0 AS artifacts
+
+          COPY --from=builder /code/onnxruntime/build/Linux/Release/*.so*   /artifacts/lib/
+          COPY --from=builder /code/onnxruntime/build/Linux/Release/onnxruntime_perf_test  /artifacts/bin/ 2>/dev/null || true
+          COPY --from=builder /code/onnxruntime/build/Linux/Release/onnx_test_runner        /artifacts/bin/ 2>/dev/null || true
+          COPY --from=builder /code/onnxruntime/include/                                    /artifacts/include/
+
+          CMD ["/bin/bash"]
+          DOCKERFILE
+
+      # -----------------------------------------------------------------------
+      # 6. Build the Docker image (aarch64 platform)
+      #    --load exports the image to the local Docker daemon so we can
+      #    copy artefacts out in the next step.
+      # -----------------------------------------------------------------------
+      - name: Build Docker image (aarch64 / CUDA 12.6)
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            --file Dockerfile.arm64_cuda \
+            --target artifacts \
+            --tag onnxruntime-arm64-cuda:${{ env.ONNXRUNTIME_SHA }} \
+            --load \
+            .
+
+      # -----------------------------------------------------------------------
+      # 7. Extract built artefacts from the Docker image
+      # -----------------------------------------------------------------------
+      - name: Extract artefacts from image
+        run: |
+          mkdir -p dist/lib dist/bin dist/include
+
+          # Create a temporary container and copy files out
+          docker create --name ort_tmp \
+            onnxruntime-arm64-cuda:${{ env.ONNXRUNTIME_SHA }}
+
+          docker cp ort_tmp:/artifacts/lib/.     dist/lib/     2>/dev/null || true
+          docker cp ort_tmp:/artifacts/bin/.     dist/bin/     2>/dev/null || true
+          docker cp ort_tmp:/artifacts/include/. dist/include/ 2>/dev/null || true
+
+          docker rm ort_tmp
+
+          echo "=== Built artefacts ==="
+          find dist/ -type f | sort
+
+      # -----------------------------------------------------------------------
+      # 8. Create a compressed release archive
+      # -----------------------------------------------------------------------
+      - name: Package artefacts
+        run: |
+          ARCHIVE="onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-linux-aarch64-cuda12.6.tar.gz"
+          tar -czf "$ARCHIVE" -C dist .
+          echo "ARCHIVE_NAME=$ARCHIVE" >> "$GITHUB_ENV"
+          echo "Archive size: $(du -sh $ARCHIVE | cut -f1)"
+
+      # -----------------------------------------------------------------------
+      # 9. Upload artefacts to the workflow run
+      # -----------------------------------------------------------------------
+      - name: Upload build artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: onnxruntime-arm64-cuda12.6-${{ env.ONNXRUNTIME_SHA }}
+          path: ${{ env.ARCHIVE_NAME }}
+          retention-days: 30
+
+      # -----------------------------------------------------------------------
+      # 10. (Optional) Create a GitHub Release when a tag is pushed
+      # -----------------------------------------------------------------------
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ARCHIVE_NAME }}
+          body: |
+            ONNX Runtime ${{ env.ONNXRUNTIME_VERSION }} built for:
+            - **Architecture**: ARM64 (aarch64) – Jetson Orin
+            - **CUDA**: 12.6
+            - **Build type**: Release
+            - **Shared library**: `libonnxruntime.so`
