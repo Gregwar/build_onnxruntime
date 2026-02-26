@@ -19,7 +19,7 @@ jobs:
       TENSORRT_HOME: /usr
       ORT_BUILD_CONFIG: RelWithDebInfo
       ORT_REPO: https://github.com/Microsoft/onnxruntime
-      ORT_REF: main          # change to a specific tag/commit for a reproducible build
+      ORT_REF: v1.24.2
 
     steps:
       # -----------------------------------------------------------------------
@@ -133,6 +133,7 @@ jobs:
             --tensorrt_home "$TENSORRT_HOME" \
             --cmake_extra_defines \
               CMAKE_CUDA_ARCHITECTURES=87 \
+              CMAKE_CXX_STANDARD=17 \
             2>&1 | tee /tmp/ort-build.log
           # Propagate the real exit code (tee always exits 0 otherwise)
           exit "${PIPESTATUS[0]}"
