@@ -12,6 +12,8 @@ jobs:
     name: Build (arm64, CUDA 12.6)
     # GitHub-hosted ARM64 runner (Ubuntu 22.04)
     runs-on: ubuntu-22.04-arm
+    permissions:
+      contents: write   # required to create GitHub Releases
 
     env:
       CUDA_VERSION: "12.6"
@@ -160,11 +162,20 @@ jobs:
           ls -lhR /tmp/ort-install/
 
       # -----------------------------------------------------------------------
-      # 10. Upload artefacts
+      # 10. Package and publish as a permanent GitHub Release
       # -----------------------------------------------------------------------
-      - name: Upload artefacts
-        uses: actions/upload-artifact@v4
+      - name: Package artefacts
+        if: github.event_name != 'pull_request'
+        run: |
+          tar -czf /tmp/onnxruntime-arm64-cuda12.6.tar.gz -C /tmp/ort-install .
+
+      - name: Publish GitHub Release
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
         with:
-          name: onnxruntime-arm64-cuda12.6
-          path: /tmp/ort-install/
-          retention-days: 30
+          tag_name: ${{ env.ORT_REF }}-arm64-cuda12.6
+          name: ONNX Runtime ${{ env.ORT_REF }} – ARM64 + CUDA 12.6
+          body: |
+            Pre-built ONNX Runtime **${{ env.ORT_REF }}** for **ARM64** (Jetson Orin / SBSA)
+            with **CUDA 12.6** and **TensorRT** execution providers.
+          files: /tmp/onnxruntime-arm64-cuda12.6.tar.gz
